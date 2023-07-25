@@ -1,6 +1,7 @@
 import dataclasses
 import filecmp
 import os
+import pathlib
 import yaml
 
 MAPPINGS_FILE = "files.yaml"
@@ -29,30 +30,42 @@ class Mappings:
             idata = yaml.safe_load(fs)
             return cls(idata)
 
-def clear(m: Mapping):
+def exists(m: Mapping):
     if os.path.exists(m.dest):
-        print(f'{m.name}: Removing destination file: {m.dest}')
+        return True
+    else:
+        return False
+    
+def clear(m: Mapping):
+    i = input(f'{m.name}: Remove destination file: {m.dest} ? (y/N)')
+    if i == 'y':
         os.remove(m.dest)
+        return True
+    else:
+        return False
 
 def check(m: Mapping):
-    if os.path.exists(m.dest):
-        print(f'{m.name}: File already exists at destination: {m.dest}')
-        if filecmp.cmp(m.source, m.dest):
-            print(f'     Files are equal')
-        else:
-            print(f'     Files are different')
-        return False
-    return True
+    print(f'{m.name}: File already exists at destination: {m.dest}')
+    if filecmp.cmp(m.source, m.dest):
+        print(f'     Files are equal')
+    else:
+        print(f'     Files are different')
 
 def linkfile(m: Mapping):
     print(f'{m.name}: linking {m.dest} -> {m.source}')
+    dest = pathlib.Path(m.dest)
+    if not dest.parent.exists():
+        dest.parent.mkdir(parents=True)
     os.symlink(m.source, m.dest)
 
 def main():
     maps = Mappings.from_yaml(MAPPINGS_FILE)
     for m in maps.items():
-        clear(m)
-        if check(m):
+        if exists(m):
+            check(m)
+            if clear(m):
+                linkfile(m)
+        else:
             linkfile(m)
 
 if __name__ == "__main__":
