@@ -1,0 +1,9 @@
+[project]
+name = "dfm"
+authors = [
+    {name = "Josh Langsfeld", email = "josh.langsfeld@gmail.com"}
+]
+version = "0.1.0"
+
+[project.scripts]
+dfm = "dfm:main"
