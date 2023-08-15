@@ -1,10 +1,9 @@
+import argparse
 import dataclasses
 import filecmp
 import os
 import pathlib
 import yaml
-
-MAPPINGS_FILE = "files.yaml"
 
 @dataclasses.dataclass
 class Mapping:
@@ -35,7 +34,7 @@ def exists(m: Mapping):
         return True
     else:
         return False
-    
+
 def clear(m: Mapping):
     i = input(f'{m.name}: Remove destination file: {m.dest} ? (y/N)')
     if i == 'y':
@@ -44,12 +43,11 @@ def clear(m: Mapping):
     else:
         return False
 
-def check(m: Mapping):
-    print(f'{m.name}: File already exists at destination: {m.dest}')
+def has_diff(m: Mapping):
     if filecmp.cmp(m.source, m.dest):
-        print(f'     Files are equal')
+        return False
     else:
-        print(f'     Files are different')
+        return True
 
 def linkfile(m: Mapping):
     print(f'{m.name}: linking {m.dest} -> {m.source}')
@@ -58,15 +56,34 @@ def linkfile(m: Mapping):
         dest.parent.mkdir(parents=True)
     os.symlink(m.source, m.dest)
 
+def mk_argparser():
+    parser = argparse.ArgumentParser(
+        description="DotFile Manager"
+    )
+    parser.add_argument("dir",
+        help="Directory with files.yaml mappings list, default current dir",
+        nargs="?",
+        default=os.getcwd(),
+    )
+    return parser
+
 def main():
-    maps = Mappings.from_yaml(MAPPINGS_FILE)
-    for m in maps.items():
-        if exists(m):
-            check(m)
-            if clear(m):
+    parser = mk_argparser()
+    args = parser.parse_args()
+    try:
+        maps = Mappings.from_yaml(os.path.join(args.dir, 'files.yaml'))
+        for m in maps.items():
+            if exists(m):
+                if has_diff(m):
+                    print(f'{m.name}: Different file already exists at destination: {m.dest}')
+                    if clear(m):
+                        linkfile(m)
+                else:
+                    print(f'{m.name}: Already up to date')
+            else:
                 linkfile(m)
-        else:
-            linkfile(m)
+    except Exception as e:
+        print(e)
 
 if __name__ == "__main__":
     main()
