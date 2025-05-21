@@ -3,6 +3,9 @@ name = "dfm"
 authors = [
     {name = "Josh Langsfeld", email = "josh.langsfeld@gmail.com"}
 ]
+dependencies = [
+    "pyyaml",
+]
 version = "0.1.0"
 
 [project.scripts]
