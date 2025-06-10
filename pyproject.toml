@@ -5,6 +5,7 @@ authors = [
 ]
 dependencies = [
     "pyyaml",
+    "termcolor",
 ]
 version = "0.1.0"
 

@@ -4,6 +4,7 @@ import filecmp
 import os
 import pathlib
 import yaml
+from termcolor import cprint
 
 @dataclasses.dataclass
 class Mapping:
@@ -12,10 +13,10 @@ class Mapping:
     dest: str
 
 class Mappings:
-    def __init__(self, data: dict):
+    def __init__(self, cfg_dir: pathlib.Path, data: dict):
         self._mappings = list()
         for (s,d) in data.items():
-            ls = os.path.join(os.getcwd(), s)
+            ls = cfg_dir / s
             hd = os.path.expanduser(os.path.join("~", d))
             self._mappings.append(Mapping(s,ls,hd))
 
@@ -24,10 +25,10 @@ class Mappings:
             yield item
 
     @classmethod
-    def from_yaml(cls, filename):
+    def from_yaml(cls, filename: pathlib.Path):
         with open(filename) as fs:
             idata = yaml.safe_load(fs)
-            return cls(idata)
+            return cls(filename.parent, idata)
 
 def exists(m: Mapping):
     if os.path.exists(m.dest):
@@ -35,7 +36,11 @@ def exists(m: Mapping):
     else:
         return False
 
-def clear(m: Mapping):
+def clear(m: Mapping, *, dry_run: bool = False):
+    if dry_run:
+        cprint(f'{m.name}: Remove destination file: {m.dest}', 'yellow')
+        return
+
     i = input(f'{m.name}: Remove destination file: {m.dest} ? (y/N)')
     if i == 'y':
         os.remove(m.dest)
@@ -49,8 +54,11 @@ def has_diff(m: Mapping):
     else:
         return True
 
-def linkfile(m: Mapping):
-    print(f'{m.name}: linking {m.dest} -> {m.source}')
+def linkfile(m: Mapping, *, dry_run: bool=False):
+    cprint(f'{m.name}: linking {m.dest} -> {m.source}', 'yellow')
+    if dry_run:
+        return
+
     dest = pathlib.Path(m.dest)
     if not dest.parent.exists():
         dest.parent.mkdir(parents=True)
@@ -63,7 +71,12 @@ def mk_argparser():
     parser.add_argument("dir",
         help="Directory with files.yaml mappings list, default current dir",
         nargs="?",
+        type=pathlib.Path,
         default=os.getcwd(),
+    )
+    parser.add_argument("-n", "--dry-run",
+        action="store_true",
+        help="Only print actions to be taken",
     )
     return parser
 
@@ -71,17 +84,20 @@ def main():
     parser = mk_argparser()
     args = parser.parse_args()
     try:
-        maps = Mappings.from_yaml(os.path.join(args.dir, 'files.yaml'))
+        input_file = args.dir / 'files.yaml'
+        if not input_file.exists():
+            raise RuntimeError(f"'files.yaml' input not found in '{args.dir}'")
+        maps = Mappings.from_yaml(input_file)
         for m in maps.items():
             if exists(m):
                 if has_diff(m):
-                    print(f'{m.name}: Different file already exists at destination: {m.dest}')
-                    if clear(m):
-                        linkfile(m)
+                    cprint(f'{m.name}: Different file already exists at: {m.dest}', 'red')
+                    if clear(m, dry_run=args.dry_run):
+                        linkfile(m, dry_run=args.dry_run)
                 else:
-                    print(f'{m.name}: Already up to date')
+                    cprint(f'{m.name}: Up to date', 'green')
             else:
-                linkfile(m)
+                linkfile(m, dry_run=args.dry_run)
     except Exception as e:
         print(e)
 
