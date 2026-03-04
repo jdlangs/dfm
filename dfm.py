@@ -103,11 +103,13 @@ def load_mappings(cfg_dir: pathlib.Path):
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option("-C", "--dir", type=click.Path(exists=True, file_okay=False, path_type=pathlib.Path), default=None, help="Dotfiles directory (default: cwd, then ~/.dotfiles).")
+@click.option("--no-git", is_flag=True, help="Skip git commit and push.")
 @click.pass_context
-def main(ctx, dir):
+def main(ctx, dir, no_git):
     """DotFile Manager"""
     ctx.ensure_object(dict)
     ctx.obj["dir"] = resolve_cfg_dir(dir)
+    ctx.obj["no_git"] = no_git
 
 
 @main.command()
@@ -187,12 +189,22 @@ def status(ctx):
     console.print(table)
 
 
-def commit_and_push(cfg_dir: pathlib.Path, paths: list[str], message: str):
-    """Stage paths, commit, and push to origin."""
+def open_repo(cfg_dir: pathlib.Path):
+    """Open a git repo, erroring if not a repo or if there are dirty files."""
     try:
         repo = git.Repo(cfg_dir)
     except git.InvalidGitRepositoryError:
         raise click.ClickException(f"'{cfg_dir}' is not a git repository")
+    if repo.is_dirty() or repo.untracked_files:
+        raise click.ClickException(
+            f"Dotfiles repo has uncommitted changes. Commit or stash them first."
+        )
+    return repo
+
+
+def commit_and_push(cfg_dir: pathlib.Path, paths: list[str], message: str):
+    """Stage paths, commit, and push to origin."""
+    repo = open_repo(cfg_dir)
 
     repo.index.add(paths)
     repo.index.commit(message)
@@ -262,8 +274,13 @@ def adopt(ctx, file, repo_path, dry_run):
 
     # Compute repo-relative path
     if repo_path is None:
-        # Strip leading dot: .config/fish/config.fish -> config/fish/config.fish
-        repo_path = home_rel.lstrip(".")
+        # ~/.config/foo/bar -> foo/bar (skip .config prefix)
+        # ~/.other -> other (strip leading dot)
+        config_prefix = ".config" + os.sep
+        if home_rel.startswith(config_prefix):
+            repo_path = home_rel[len(config_prefix):]
+        else:
+            repo_path = home_rel.lstrip(".")
     repo_dest = cfg_dir / repo_path
 
     # Check for conflicts
@@ -280,12 +297,17 @@ def adopt(ctx, file, repo_path, dry_run):
         if home_rel in existing.values():
             raise click.ClickException(f"Destination already in files.yaml: {home_rel}")
 
+    # Check repo is clean before making changes
+    if not ctx.obj["no_git"]:
+        open_repo(cfg_dir)
+
     if dry_run:
         console.print(f"[yellow]Would move:[/yellow] {file} -> {repo_dest}")
         console.print(f"[yellow]Would add to files.yaml:[/yellow] \"{repo_path}\": \"{home_rel}\"")
         console.print(f"[yellow]Would symlink:[/yellow] {file} -> {repo_dest}")
-        console.print(f"[yellow]Would commit:[/yellow] Adopt {home_rel}")
-        console.print(f"[yellow]Would push[/yellow] to origin")
+        if not ctx.obj["no_git"]:
+            console.print(f"[yellow]Would commit:[/yellow] Adopt {home_rel}")
+            console.print(f"[yellow]Would push[/yellow] to origin")
         return
 
     # Move file into repo
@@ -302,7 +324,8 @@ def adopt(ctx, file, repo_path, dry_run):
     linkfile(m)
 
     # Git commit and push
-    commit_and_push(cfg_dir, [repo_path, "files.yaml"], f"Adopt {home_rel}")
+    if not ctx.obj["no_git"]:
+        commit_and_push(cfg_dir, [repo_path, "files.yaml"], f"Adopt {home_rel}")
 
 
 @main.command()
@@ -348,6 +371,10 @@ def drop(ctx, file, rm, dry_run):
     if not repo_source.exists():
         raise click.ClickException(f"Source file not found in repo: {repo_source}")
 
+    # Check repo is clean before making changes
+    if not ctx.obj["no_git"]:
+        open_repo(cfg_dir)
+
     if dry_run:
         if file.is_symlink() or file.exists():
             console.print(f"[yellow]Would remove:[/yellow] {file}")
@@ -355,8 +382,9 @@ def drop(ctx, file, rm, dry_run):
             console.print(f"[yellow]Would copy:[/yellow] {repo_source} -> {file}")
         console.print(f"[yellow]Would remove from repo:[/yellow] {repo_source}")
         console.print(f"[yellow]Would remove from files.yaml:[/yellow] {repo_path}")
-        console.print(f"[yellow]Would commit:[/yellow] Drop {home_rel}")
-        console.print(f"[yellow]Would push[/yellow] to origin")
+        if not ctx.obj["no_git"]:
+            console.print(f"[yellow]Would commit:[/yellow] Drop {home_rel}")
+            console.print(f"[yellow]Would push[/yellow] to origin")
         return
 
     # Remove symlink/file if it exists
@@ -388,30 +416,27 @@ def drop(ctx, file, rm, dry_run):
     console.print(f"[green]Removed from files.yaml:[/green] {repo_path}")
 
     # Git commit and push
-    try:
+    if not ctx.obj["no_git"]:
         repo = git.Repo(cfg_dir)
-    except git.InvalidGitRepositoryError:
-        raise click.ClickException(f"'{cfg_dir}' is not a git repository")
+        repo.index.remove([repo_path])
+        repo.index.add(["files.yaml"])
+        repo.index.commit(f"Drop {home_rel}")
+        console.print(f"[green]Committed:[/green] Drop {home_rel}")
 
-    repo.index.remove([repo_path])
-    repo.index.add(["files.yaml"])
-    repo.index.commit(f"Drop {home_rel}")
-    console.print(f"[green]Committed:[/green] Drop {home_rel}")
+        try:
+            origin = repo.remotes.origin
+        except (ValueError, AttributeError):
+            console.print("[yellow]Warning:[/yellow] No remote 'origin' found, skipping push")
+            return
 
-    try:
-        origin = repo.remotes.origin
-    except (ValueError, AttributeError):
-        console.print("[yellow]Warning:[/yellow] No remote 'origin' found, skipping push")
-        return
-
-    try:
-        push_info = origin.push()
-        if push_info and any(info.flags & info.ERROR for info in push_info):
-            console.print(f"[yellow]Warning:[/yellow] Push failed: {push_info[0].summary}")
-        else:
-            console.print("[green]Pushed[/green] to origin")
-    except git.GitCommandError as e:
-        console.print(f"[yellow]Warning:[/yellow] Push failed: {e}")
+        try:
+            push_info = origin.push()
+            if push_info and any(info.flags & info.ERROR for info in push_info):
+                console.print(f"[yellow]Warning:[/yellow] Push failed: {push_info[0].summary}")
+            else:
+                console.print("[green]Pushed[/green] to origin")
+        except git.GitCommandError as e:
+            console.print(f"[yellow]Warning:[/yellow] Push failed: {e}")
 
 
 if __name__ == "__main__":
