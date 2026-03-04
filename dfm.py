@@ -2,6 +2,7 @@ import dataclasses
 import filecmp
 import os
 import pathlib
+import shutil
 
 import click
 import git
@@ -184,6 +185,109 @@ def status(ctx):
         table.add_row(link_cell, repo_cell, dest_display, m.name)
 
     console.print(table)
+
+
+def append_to_files_yaml(cfg_dir: pathlib.Path, repo_path: str, home_rel: str):
+    """Append a new entry to files.yaml."""
+    files_yaml = cfg_dir / "files.yaml"
+    with open(files_yaml, "a") as f:
+        f.write(f'"{repo_path}": "{home_rel}"\n')
+
+
+@main.command()
+@click.argument("file", type=click.Path(path_type=pathlib.Path))
+@click.option("--repo-path", default=None, help="Where to place the file inside the repo. Default: auto-derived.")
+@click.option("-n", "--dry-run", is_flag=True, help="Only print actions to be taken")
+@click.pass_context
+def adopt(ctx, file, repo_path, dry_run):
+    """Adopt an existing dotfile into the repo."""
+    cfg_dir = ctx.obj["dir"]
+    home = pathlib.Path.home()
+
+    # Expand and make absolute, but don't resolve symlinks yet
+    file = file.expanduser()
+    if not file.is_absolute():
+        file = pathlib.Path.cwd() / file
+    file = pathlib.Path(os.path.normpath(file))
+
+    # Validate
+    if file.is_symlink():
+        raise click.ClickException(f"File is already a symlink (already managed?): {file}")
+    if not file.exists():
+        raise click.ClickException(f"File does not exist: {file}")
+    if not file.is_file():
+        raise click.ClickException(f"Not a regular file: {file}")
+    if not str(file).startswith(str(home)):
+        raise click.ClickException(f"File is not under home directory: {file}")
+
+    # Compute home-relative path (for files.yaml value)
+    home_rel = str(file.relative_to(home))
+
+    # Compute repo-relative path
+    if repo_path is None:
+        # Strip leading dot: .config/fish/config.fish -> config/fish/config.fish
+        repo_path = home_rel.lstrip(".")
+    repo_dest = cfg_dir / repo_path
+
+    # Check for conflicts
+    if repo_dest.exists():
+        raise click.ClickException(f"File already exists in repo: {repo_dest}")
+
+    # Check files.yaml for duplicates
+    files_yaml = cfg_dir / "files.yaml"
+    if files_yaml.exists():
+        with open(files_yaml) as f:
+            existing = yaml.safe_load(f) or {}
+        if repo_path in existing:
+            raise click.ClickException(f"Entry already in files.yaml: {repo_path}")
+        if home_rel in existing.values():
+            raise click.ClickException(f"Destination already in files.yaml: {home_rel}")
+
+    if dry_run:
+        console.print(f"[yellow]Would move:[/yellow] {file} -> {repo_dest}")
+        console.print(f"[yellow]Would add to files.yaml:[/yellow] \"{repo_path}\": \"{home_rel}\"")
+        console.print(f"[yellow]Would symlink:[/yellow] {file} -> {repo_dest}")
+        console.print(f"[yellow]Would commit:[/yellow] Adopt {home_rel}")
+        console.print(f"[yellow]Would push[/yellow] to origin")
+        return
+
+    # Move file into repo
+    repo_dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(file), str(repo_dest))
+    console.print(f"[green]Moved:[/green] {file} -> {repo_dest}")
+
+    # Update files.yaml
+    append_to_files_yaml(cfg_dir, repo_path, home_rel)
+    console.print(f"[green]Added to files.yaml:[/green] \"{repo_path}\": \"{home_rel}\"")
+
+    # Create symlink
+    m = Mapping(repo_path, str(repo_dest), str(file))
+    linkfile(m)
+
+    # Git commit and push
+    try:
+        repo = git.Repo(cfg_dir)
+    except git.InvalidGitRepositoryError:
+        raise click.ClickException(f"'{cfg_dir}' is not a git repository")
+
+    repo.index.add([repo_path, "files.yaml"])
+    repo.index.commit(f"Adopt {home_rel}")
+    console.print(f"[green]Committed:[/green] Adopt {home_rel}")
+
+    try:
+        origin = repo.remotes.origin
+    except (ValueError, AttributeError):
+        console.print("[yellow]Warning:[/yellow] No remote 'origin' found, skipping push")
+        return
+
+    try:
+        push_info = origin.push()
+        if push_info and any(info.flags & info.ERROR for info in push_info):
+            console.print(f"[yellow]Warning:[/yellow] Push failed: {push_info[0].summary}")
+        else:
+            console.print("[green]Pushed[/green] to origin")
+    except git.GitCommandError as e:
+        console.print(f"[yellow]Warning:[/yellow] Push failed: {e}")
 
 
 if __name__ == "__main__":
