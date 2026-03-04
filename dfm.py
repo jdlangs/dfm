@@ -50,12 +50,21 @@ def exists(m: Mapping):
 
 def clear(m: Mapping, *, dry_run: bool = False):
     if dry_run:
-        console.print(f'{m.name}: Remove destination file: {m.dest}', style="yellow")
+        console.print(f'{m.name}: Different file exists at {m.dest}, would replace with symlink', style="yellow")
         return
 
-    i = input(f'{m.name}: Remove destination file: {m.dest} ? (y/N)')
-    if i == 'y':
+    choice = click.prompt(
+        f'{m.name}: Different file exists at {m.dest}. [r]eplace / [b]ackup & replace / [s]kip',
+        type=click.Choice(['r', 'b', 's'], case_sensitive=False),
+        default='s',
+    )
+    if choice == 'r':
         os.remove(m.dest)
+        return True
+    elif choice == 'b':
+        backup = m.dest + ".bak"
+        shutil.move(m.dest, backup)
+        console.print(f"[green]Backed up:[/green] {m.dest} -> {backup}")
         return True
     else:
         return False
@@ -119,14 +128,29 @@ def main(ctx, dir, no_git, dry_run):
 @main.command()
 @click.pass_context
 def sync(ctx):
-    """Sync symlinks from files.yaml mappings."""
+    """Pull latest changes and sync symlinks from files.yaml mappings."""
     dry_run = ctx.obj["dry_run"]
     cfg_dir = ctx.obj["dir"]
+
+    if not ctx.obj["no_git"]:
+        try:
+            repo = git.Repo(cfg_dir)
+            if dry_run:
+                console.print("[yellow]Would pull[/yellow] from origin")
+            else:
+                origin = repo.remotes.origin
+                origin.pull()
+                console.print("[green]Pulled[/green] from origin")
+        except (git.InvalidGitRepositoryError, ValueError, AttributeError):
+            pass
+        except git.GitCommandError as e:
+            console.print(f"[yellow]Warning:[/yellow] Pull failed: {e}")
+
     maps = load_mappings(cfg_dir)
     for m in maps.items():
         if exists(m):
             if has_diff(m):
-                console.print(f'{m.name}: Different file already exists at: {m.dest}', style="red")
+                console.print(f'{m.name}: Local file differs from repo version', style="red")
                 if clear(m, dry_run=dry_run):
                     linkfile(m, dry_run=dry_run)
             else:
