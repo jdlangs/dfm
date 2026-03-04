@@ -3,6 +3,7 @@ import filecmp
 import os
 import pathlib
 import shutil
+import subprocess
 
 import click
 import git
@@ -202,9 +203,15 @@ def open_repo(cfg_dir: pathlib.Path):
     return repo
 
 
-def commit_and_push(cfg_dir: pathlib.Path, paths: list[str], message: str):
+def commit_and_push(cfg_dir: pathlib.Path, paths: list[str], message: str, *, check_clean: bool = True):
     """Stage paths, commit, and push to origin."""
-    repo = open_repo(cfg_dir)
+    if check_clean:
+        repo = open_repo(cfg_dir)
+    else:
+        try:
+            repo = git.Repo(cfg_dir)
+        except git.InvalidGitRepositoryError:
+            raise click.ClickException(f"'{cfg_dir}' is not a git repository")
 
     repo.index.add(paths)
     repo.index.commit(message)
@@ -236,6 +243,67 @@ def remove_from_files_yaml(cfg_dir: pathlib.Path, repo_path: str):
         yaml.dump(data, f, default_flow_style=False)
 
 
+def resolve_file_arg(file: pathlib.Path):
+    """Expand and normalize a file path argument to absolute."""
+    file = file.expanduser()
+    if not file.is_absolute():
+        file = pathlib.Path.cwd() / file
+    return pathlib.Path(os.path.normpath(file))
+
+
+def lookup_mapping(cfg_dir: pathlib.Path, home_rel: str):
+    """Look up a repo-relative path in files.yaml by its home-relative destination."""
+    files_yaml = cfg_dir / "files.yaml"
+    if not files_yaml.exists():
+        raise click.ClickException(f"'files.yaml' not found in '{cfg_dir}'")
+    with open(files_yaml) as f:
+        data = yaml.safe_load(f) or {}
+    for k, v in data.items():
+        if v == home_rel:
+            return k
+    raise click.ClickException(f"No entry found in files.yaml for: {home_rel}")
+
+
+def commit_prefix(repo_paths: list[str]):
+    """Derive the commit prefix from repo paths (top-level directory or filename)."""
+    prefixes = set()
+    for rp in repo_paths:
+        parts = pathlib.PurePosixPath(rp).parts
+        prefixes.add(parts[0] if len(parts) > 1 else rp)
+    if len(prefixes) == 1:
+        return prefixes.pop()
+    return "dotfiles"
+
+
+def generate_commit_message(cfg_dir: pathlib.Path, repo_paths: list[str]):
+    """Generate a commit message, using Claude CLI if available."""
+    prefix = commit_prefix(repo_paths)
+    repo = git.Repo(cfg_dir)
+    diff_output = "\n".join(repo.git.diff(rp) for rp in repo_paths)
+
+    if diff_output and shutil.which("claude"):
+        try:
+            prompt = (
+                "Write a concise one-line git commit message for this dotfile change. "
+                f"Use the format: '{prefix}: <short description>'. "
+                "No quotes, no explanation, just the message.\n\n"
+                f"{diff_output}"
+            )
+            result = subprocess.run(
+                ["claude", "-p", "--model", "haiku", prompt],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    # Fallback
+    if len(repo_paths) == 1:
+        return f"{prefix}: update {pathlib.PurePosixPath(repo_paths[0]).name}"
+    return f"{prefix}: update {len(repo_paths)} files"
+
+
 def append_to_files_yaml(cfg_dir: pathlib.Path, repo_path: str, home_rel: str):
     """Append a new entry to files.yaml."""
     files_yaml = cfg_dir / "files.yaml"
@@ -252,12 +320,7 @@ def adopt(ctx, file, repo_path, dry_run):
     """Adopt an existing dotfile into the repo."""
     cfg_dir = ctx.obj["dir"]
     home = pathlib.Path.home()
-
-    # Expand and make absolute, but don't resolve symlinks yet
-    file = file.expanduser()
-    if not file.is_absolute():
-        file = pathlib.Path.cwd() / file
-    file = pathlib.Path(os.path.normpath(file))
+    file = resolve_file_arg(file)
 
     # Validate
     if file.is_symlink():
@@ -337,35 +400,13 @@ def drop(ctx, file, rm, dry_run):
     """Remove a dotfile from repo management, copying it back to its original location."""
     cfg_dir = ctx.obj["dir"]
     home = pathlib.Path.home()
-
-    # Expand and make absolute
-    file = file.expanduser()
-    if not file.is_absolute():
-        file = pathlib.Path.cwd() / file
-    file = pathlib.Path(os.path.normpath(file))
+    file = resolve_file_arg(file)
 
     if not str(file).startswith(str(home)):
         raise click.ClickException(f"File is not under home directory: {file}")
 
     home_rel = str(file.relative_to(home))
-
-    # Find the entry in files.yaml
-    files_yaml = cfg_dir / "files.yaml"
-    if not files_yaml.exists():
-        raise click.ClickException(f"'files.yaml' not found in '{cfg_dir}'")
-    with open(files_yaml) as f:
-        data = yaml.safe_load(f) or {}
-
-    # Look up by home-relative destination value
-    repo_path = None
-    for k, v in data.items():
-        if v == home_rel:
-            repo_path = k
-            break
-
-    if repo_path is None:
-        raise click.ClickException(f"No entry found in files.yaml for: {home_rel}")
-
+    repo_path = lookup_mapping(cfg_dir, home_rel)
     repo_source = cfg_dir / repo_path
 
     if not repo_source.exists():
@@ -437,6 +478,108 @@ def drop(ctx, file, rm, dry_run):
                 console.print("[green]Pushed[/green] to origin")
         except git.GitCommandError as e:
             console.print(f"[yellow]Warning:[/yellow] Push failed: {e}")
+
+
+@main.command()
+@click.argument("file", type=click.Path(path_type=pathlib.Path), required=False, default=None)
+@click.pass_context
+def diff(ctx, file):
+    """Show the git diff of managed dotfiles. If FILE is given, show only that file."""
+    cfg_dir = ctx.obj["dir"]
+
+    try:
+        repo = git.Repo(cfg_dir)
+    except git.InvalidGitRepositoryError:
+        raise click.ClickException(f"'{cfg_dir}' is not a git repository")
+
+    if file is not None:
+        home = pathlib.Path.home()
+        file = resolve_file_arg(file)
+        if not str(file).startswith(str(home)):
+            raise click.ClickException(f"File is not under home directory: {file}")
+        home_rel = str(file.relative_to(home))
+        repo_path = lookup_mapping(cfg_dir, home_rel)
+        diff_output = repo.git.diff(repo_path)
+    else:
+        diff_output = repo.git.diff()
+
+    if diff_output:
+        click.echo(diff_output)
+    else:
+        console.print("[green]No changes[/green]")
+
+
+@main.command()
+@click.argument("files", type=click.Path(path_type=pathlib.Path), nargs=-1, required=True)
+@click.option("-m", "--message", default=None, help="Commit message. Default: auto-generated.")
+@click.option("-n", "--dry-run", is_flag=True, help="Only print actions to be taken")
+@click.pass_context
+def commit(ctx, files, message, dry_run):
+    """Commit changes to managed dotfiles."""
+    cfg_dir = ctx.obj["dir"]
+    home = pathlib.Path.home()
+
+    repo_paths = []
+    for file in files:
+        file = resolve_file_arg(file)
+        if not str(file).startswith(str(home)):
+            raise click.ClickException(f"File is not under home directory: {file}")
+        home_rel = str(file.relative_to(home))
+        repo_paths.append(lookup_mapping(cfg_dir, home_rel))
+
+    if message is None:
+        message = generate_commit_message(cfg_dir, repo_paths)
+
+    if dry_run:
+        for rp in repo_paths:
+            console.print(f"[yellow]Would stage:[/yellow] {rp}")
+        console.print(f"[yellow]Would commit:[/yellow] {message}")
+        console.print(f"[yellow]Would push[/yellow] to origin")
+        return
+
+    commit_and_push(cfg_dir, repo_paths, message, check_clean=False)
+
+
+@main.command()
+@click.argument("files", type=click.Path(path_type=pathlib.Path), nargs=-1)
+@click.option("-y", "--yes", is_flag=True, help="Skip confirmation prompt")
+@click.option("-n", "--dry-run", is_flag=True, help="Only print actions to be taken")
+@click.pass_context
+def reset(ctx, files, yes, dry_run):
+    """Reset modified dotfiles to the last committed version. Resets all changes if no files given."""
+    cfg_dir = ctx.obj["dir"]
+    home = pathlib.Path.home()
+
+    try:
+        repo = git.Repo(cfg_dir)
+    except git.InvalidGitRepositoryError:
+        raise click.ClickException(f"'{cfg_dir}' is not a git repository")
+
+    if files:
+        repo_paths = []
+        for file in files:
+            file = resolve_file_arg(file)
+            if not str(file).startswith(str(home)):
+                raise click.ClickException(f"File is not under home directory: {file}")
+            home_rel = str(file.relative_to(home))
+            repo_paths.append(lookup_mapping(cfg_dir, home_rel))
+    else:
+        # Reset everything that has changes
+        repo_paths = [d.a_path for d in repo.index.diff(None)]
+        if not repo_paths:
+            console.print("[green]No changes to reset[/green]")
+            return
+
+    for rp in repo_paths:
+        if dry_run:
+            console.print(f"[yellow]Would reset:[/yellow] {rp}")
+            continue
+
+        if not yes and not click.confirm(f"Reset {rp}?"):
+            continue
+
+        repo.git.checkout("--", rp)
+        console.print(f"[green]Reset:[/green] {rp}")
 
 
 if __name__ == "__main__":
