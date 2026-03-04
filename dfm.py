@@ -6,6 +6,7 @@ import shutil
 import subprocess
 
 import click
+from click.shell_completion import CompletionItem
 import git
 import yaml
 from rich.console import Console
@@ -304,6 +305,23 @@ def generate_commit_message(cfg_dir: pathlib.Path, repo_paths: list[str]):
     return f"{prefix}: update {len(repo_paths)} files"
 
 
+def complete_managed_files(ctx, param, incomplete):
+    """Shell completion for managed dotfile paths."""
+    try:
+        cfg_dir = resolve_cfg_dir(ctx.params.get("dir"))
+        maps = load_mappings(cfg_dir)
+    except Exception:
+        return []
+
+    home = pathlib.Path.home()
+    completions = []
+    for m in maps.items():
+        dest = f"~/{pathlib.Path(m.dest).relative_to(home)}"
+        if dest.startswith(incomplete) or m.dest.startswith(incomplete):
+            completions.append(CompletionItem(dest))
+    return completions
+
+
 def append_to_files_yaml(cfg_dir: pathlib.Path, repo_path: str, home_rel: str):
     """Append a new entry to files.yaml."""
     files_yaml = cfg_dir / "files.yaml"
@@ -392,7 +410,7 @@ def adopt(ctx, file, repo_path, dry_run):
 
 
 @main.command()
-@click.argument("file", type=click.Path(path_type=pathlib.Path))
+@click.argument("file", type=click.Path(path_type=pathlib.Path), shell_complete=complete_managed_files)
 @click.option("-r", "--rm", is_flag=True, help="Delete the file entirely instead of copying it back")
 @click.option("-n", "--dry-run", is_flag=True, help="Only print actions to be taken")
 @click.pass_context
@@ -481,7 +499,7 @@ def drop(ctx, file, rm, dry_run):
 
 
 @main.command()
-@click.argument("file", type=click.Path(path_type=pathlib.Path), required=False, default=None)
+@click.argument("file", type=click.Path(path_type=pathlib.Path), required=False, default=None, shell_complete=complete_managed_files)
 @click.pass_context
 def diff(ctx, file):
     """Show the git diff of managed dotfiles. If FILE is given, show only that file."""
@@ -510,7 +528,7 @@ def diff(ctx, file):
 
 
 @main.command()
-@click.argument("files", type=click.Path(path_type=pathlib.Path), nargs=-1, required=True)
+@click.argument("files", type=click.Path(path_type=pathlib.Path), nargs=-1, required=True, shell_complete=complete_managed_files)
 @click.option("-m", "--message", default=None, help="Commit message. Default: auto-generated.")
 @click.option("-n", "--dry-run", is_flag=True, help="Only print actions to be taken")
 @click.pass_context
@@ -541,7 +559,7 @@ def commit(ctx, files, message, dry_run):
 
 
 @main.command()
-@click.argument("files", type=click.Path(path_type=pathlib.Path), nargs=-1)
+@click.argument("files", type=click.Path(path_type=pathlib.Path), nargs=-1, shell_complete=complete_managed_files)
 @click.option("-y", "--yes", is_flag=True, help="Skip confirmation prompt")
 @click.option("-n", "--dry-run", is_flag=True, help="Only print actions to be taken")
 @click.pass_context
