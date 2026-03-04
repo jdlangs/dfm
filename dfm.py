@@ -106,19 +106,21 @@ def load_mappings(cfg_dir: pathlib.Path):
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option("-C", "--dir", type=click.Path(exists=True, file_okay=False, path_type=pathlib.Path), default=None, help="Dotfiles directory (default: cwd, then ~/.dotfiles).")
 @click.option("--no-git", is_flag=True, help="Skip git commit and push.")
+@click.option("-n", "--dry-run", is_flag=True, help="Only print actions to be taken")
 @click.pass_context
-def main(ctx, dir, no_git):
+def main(ctx, dir, no_git, dry_run):
     """DotFile Manager"""
     ctx.ensure_object(dict)
     ctx.obj["dir"] = resolve_cfg_dir(dir)
     ctx.obj["no_git"] = no_git
+    ctx.obj["dry_run"] = dry_run
 
 
 @main.command()
-@click.option("-n", "--dry-run", is_flag=True, help="Only print actions to be taken")
 @click.pass_context
-def sync(ctx, dry_run):
+def sync(ctx):
     """Sync symlinks from files.yaml mappings."""
+    dry_run = ctx.obj["dry_run"]
     cfg_dir = ctx.obj["dir"]
     maps = load_mappings(cfg_dir)
     for m in maps.items():
@@ -332,10 +334,10 @@ def append_to_files_yaml(cfg_dir: pathlib.Path, repo_path: str, home_rel: str):
 @main.command()
 @click.argument("file", type=click.Path(path_type=pathlib.Path))
 @click.option("--repo-path", default=None, help="Where to place the file inside the repo. Default: auto-derived.")
-@click.option("-n", "--dry-run", is_flag=True, help="Only print actions to be taken")
 @click.pass_context
-def adopt(ctx, file, repo_path, dry_run):
+def adopt(ctx, file, repo_path):
     """Adopt an existing dotfile into the repo."""
+    dry_run = ctx.obj["dry_run"]
     cfg_dir = ctx.obj["dir"]
     home = pathlib.Path.home()
     file = resolve_file_arg(file)
@@ -412,10 +414,10 @@ def adopt(ctx, file, repo_path, dry_run):
 @main.command()
 @click.argument("file", type=click.Path(path_type=pathlib.Path), shell_complete=complete_managed_files)
 @click.option("-r", "--rm", is_flag=True, help="Delete the file entirely instead of copying it back")
-@click.option("-n", "--dry-run", is_flag=True, help="Only print actions to be taken")
 @click.pass_context
-def drop(ctx, file, rm, dry_run):
+def drop(ctx, file, rm):
     """Remove a dotfile from repo management, copying it back to its original location."""
+    dry_run = ctx.obj["dry_run"]
     cfg_dir = ctx.obj["dir"]
     home = pathlib.Path.home()
     file = resolve_file_arg(file)
@@ -530,10 +532,10 @@ def diff(ctx, file):
 @main.command()
 @click.argument("files", type=click.Path(path_type=pathlib.Path), nargs=-1, required=True, shell_complete=complete_managed_files)
 @click.option("-m", "--message", default=None, help="Commit message. Default: auto-generated.")
-@click.option("-n", "--dry-run", is_flag=True, help="Only print actions to be taken")
 @click.pass_context
-def commit(ctx, files, message, dry_run):
+def commit(ctx, files, message):
     """Commit changes to managed dotfiles."""
+    dry_run = ctx.obj["dry_run"]
     cfg_dir = ctx.obj["dir"]
     home = pathlib.Path.home()
 
@@ -561,10 +563,10 @@ def commit(ctx, files, message, dry_run):
 @main.command()
 @click.argument("files", type=click.Path(path_type=pathlib.Path), nargs=-1, shell_complete=complete_managed_files)
 @click.option("-y", "--yes", is_flag=True, help="Skip confirmation prompt")
-@click.option("-n", "--dry-run", is_flag=True, help="Only print actions to be taken")
 @click.pass_context
-def reset(ctx, files, yes, dry_run):
+def reset(ctx, files, yes):
     """Reset modified dotfiles to the last committed version. Resets all changes if no files given."""
+    dry_run = ctx.obj["dry_run"]
     cfg_dir = ctx.obj["dir"]
     home = pathlib.Path.home()
 
