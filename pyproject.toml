@@ -4,8 +4,10 @@ authors = [
     {name = "Josh Langsfeld", email = "josh.langsfeld@gmail.com"}
 ]
 dependencies = [
+    "click",
+    "gitpython",
     "pyyaml",
-    "termcolor",
+    "rich",
 ]
 version = "0.1.0"
 
