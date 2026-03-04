@@ -101,7 +101,7 @@ def load_mappings(cfg_dir: pathlib.Path):
     return Mappings.from_yaml(input_file)
 
 
-@click.group()
+@click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option("-C", "--dir", type=click.Path(exists=True, file_okay=False, path_type=pathlib.Path), default=None, help="Dotfiles directory (default: cwd, then ~/.dotfiles).")
 @click.pass_context
 def main(ctx, dir):
@@ -187,6 +187,43 @@ def status(ctx):
     console.print(table)
 
 
+def commit_and_push(cfg_dir: pathlib.Path, paths: list[str], message: str):
+    """Stage paths, commit, and push to origin."""
+    try:
+        repo = git.Repo(cfg_dir)
+    except git.InvalidGitRepositoryError:
+        raise click.ClickException(f"'{cfg_dir}' is not a git repository")
+
+    repo.index.add(paths)
+    repo.index.commit(message)
+    console.print(f"[green]Committed:[/green] {message}")
+
+    try:
+        origin = repo.remotes.origin
+    except (ValueError, AttributeError):
+        console.print("[yellow]Warning:[/yellow] No remote 'origin' found, skipping push")
+        return
+
+    try:
+        push_info = origin.push()
+        if push_info and any(info.flags & info.ERROR for info in push_info):
+            console.print(f"[yellow]Warning:[/yellow] Push failed: {push_info[0].summary}")
+        else:
+            console.print("[green]Pushed[/green] to origin")
+    except git.GitCommandError as e:
+        console.print(f"[yellow]Warning:[/yellow] Push failed: {e}")
+
+
+def remove_from_files_yaml(cfg_dir: pathlib.Path, repo_path: str):
+    """Remove an entry from files.yaml by its repo-relative key."""
+    files_yaml = cfg_dir / "files.yaml"
+    with open(files_yaml) as f:
+        data = yaml.safe_load(f) or {}
+    data.pop(repo_path, None)
+    with open(files_yaml, "w") as f:
+        yaml.dump(data, f, default_flow_style=False)
+
+
 def append_to_files_yaml(cfg_dir: pathlib.Path, repo_path: str, home_rel: str):
     """Append a new entry to files.yaml."""
     files_yaml = cfg_dir / "files.yaml"
@@ -265,14 +302,101 @@ def adopt(ctx, file, repo_path, dry_run):
     linkfile(m)
 
     # Git commit and push
+    commit_and_push(cfg_dir, [repo_path, "files.yaml"], f"Adopt {home_rel}")
+
+
+@main.command()
+@click.argument("file", type=click.Path(path_type=pathlib.Path))
+@click.option("-r", "--rm", is_flag=True, help="Delete the file entirely instead of copying it back")
+@click.option("-n", "--dry-run", is_flag=True, help="Only print actions to be taken")
+@click.pass_context
+def drop(ctx, file, rm, dry_run):
+    """Remove a dotfile from repo management, copying it back to its original location."""
+    cfg_dir = ctx.obj["dir"]
+    home = pathlib.Path.home()
+
+    # Expand and make absolute
+    file = file.expanduser()
+    if not file.is_absolute():
+        file = pathlib.Path.cwd() / file
+    file = pathlib.Path(os.path.normpath(file))
+
+    if not str(file).startswith(str(home)):
+        raise click.ClickException(f"File is not under home directory: {file}")
+
+    home_rel = str(file.relative_to(home))
+
+    # Find the entry in files.yaml
+    files_yaml = cfg_dir / "files.yaml"
+    if not files_yaml.exists():
+        raise click.ClickException(f"'files.yaml' not found in '{cfg_dir}'")
+    with open(files_yaml) as f:
+        data = yaml.safe_load(f) or {}
+
+    # Look up by home-relative destination value
+    repo_path = None
+    for k, v in data.items():
+        if v == home_rel:
+            repo_path = k
+            break
+
+    if repo_path is None:
+        raise click.ClickException(f"No entry found in files.yaml for: {home_rel}")
+
+    repo_source = cfg_dir / repo_path
+
+    if not repo_source.exists():
+        raise click.ClickException(f"Source file not found in repo: {repo_source}")
+
+    if dry_run:
+        if file.is_symlink() or file.exists():
+            console.print(f"[yellow]Would remove:[/yellow] {file}")
+        if not rm:
+            console.print(f"[yellow]Would copy:[/yellow] {repo_source} -> {file}")
+        console.print(f"[yellow]Would remove from repo:[/yellow] {repo_source}")
+        console.print(f"[yellow]Would remove from files.yaml:[/yellow] {repo_path}")
+        console.print(f"[yellow]Would commit:[/yellow] Drop {home_rel}")
+        console.print(f"[yellow]Would push[/yellow] to origin")
+        return
+
+    # Remove symlink/file if it exists
+    if file.is_symlink() or file.exists():
+        file.unlink()
+        console.print(f"[green]Removed:[/green] {file}")
+
+    # Copy repo file back to original location (unless --rm)
+    if not rm:
+        file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(repo_source), str(file))
+        console.print(f"[green]Copied:[/green] {repo_source} -> {file}")
+
+    # Remove from repo
+    repo_source.unlink()
+    console.print(f"[green]Removed from repo:[/green] {repo_source}")
+
+    # Clean up empty parent directories in repo
+    parent = repo_source.parent
+    while parent != cfg_dir:
+        if not any(parent.iterdir()):
+            parent.rmdir()
+            parent = parent.parent
+        else:
+            break
+
+    # Remove from files.yaml
+    remove_from_files_yaml(cfg_dir, repo_path)
+    console.print(f"[green]Removed from files.yaml:[/green] {repo_path}")
+
+    # Git commit and push
     try:
         repo = git.Repo(cfg_dir)
     except git.InvalidGitRepositoryError:
         raise click.ClickException(f"'{cfg_dir}' is not a git repository")
 
-    repo.index.add([repo_path, "files.yaml"])
-    repo.index.commit(f"Adopt {home_rel}")
-    console.print(f"[green]Committed:[/green] Adopt {home_rel}")
+    repo.index.remove([repo_path])
+    repo.index.add(["files.yaml"])
+    repo.index.commit(f"Drop {home_rel}")
+    console.print(f"[green]Committed:[/green] Drop {home_rel}")
 
     try:
         origin = repo.remotes.origin
