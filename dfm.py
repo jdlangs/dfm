@@ -432,7 +432,7 @@ def adopt(ctx, file, repo_path):
 
     # Git commit and push
     if not ctx.obj["no_git"]:
-        commit_and_push(cfg_dir, [repo_path, "files.yaml"], f"Adopt {home_rel}")
+        commit_and_push(cfg_dir, [repo_path, "files.yaml"], f"Adopt {home_rel}", check_clean=False)
 
 
 @main.command()
