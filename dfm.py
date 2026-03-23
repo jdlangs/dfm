@@ -112,6 +112,11 @@ def load_mappings(cfg_dir: pathlib.Path):
     return Mappings.from_yaml(input_file)
 
 
+def ls_modified_files(repo) -> list[pathlib.Path]:
+    diff = repo.index.diff(None)
+    return [pathlib.Path(item.a_path) for item in diff]
+
+
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option("-C", "--dir", type=click.Path(exists=True, file_okay=False, path_type=pathlib.Path), default=None, help="Dotfiles directory (default: cwd, then ~/.dotfiles).")
 @click.option("--no-git", is_flag=True, help="Skip git commit and push.")
@@ -331,7 +336,7 @@ def generate_commit_message(cfg_dir: pathlib.Path, repo_paths: list[str]):
     return f"{prefix}: update {len(repo_paths)} files"
 
 
-def complete_managed_files(ctx, param, incomplete):
+def complete_managed_files(ctx, param, incomplete, only_modified: bool = False):
     """Shell completion for managed dotfile paths."""
     try:
         cfg_dir = resolve_cfg_dir(ctx.params.get("dir"))
@@ -339,12 +344,22 @@ def complete_managed_files(ctx, param, incomplete):
     except Exception:
         return []
 
+    if only_modified:
+        try:
+            repo = git.Repo(cfg_dir)
+            modified = ls_modified_files(repo)
+        except Exception:
+            raise
+    else:
+        modified = []
+
     home = pathlib.Path.home()
     completions = []
     for m in maps.items():
         dest = f"~/{pathlib.Path(m.dest).relative_to(home)}"
-        if dest.startswith(incomplete) or m.dest.startswith(incomplete):
-            completions.append(CompletionItem(dest))
+        if dest.startswith(incomplete) or str(m.dest).startswith(incomplete):
+            if not only_modified or pathlib.Path(m.source).relative_to(cfg_dir) in modified:
+                completions.append(CompletionItem(dest))
     return completions
 
 
@@ -525,7 +540,9 @@ def drop(ctx, file, rm):
 
 
 @main.command()
-@click.argument("file", type=click.Path(path_type=pathlib.Path), required=False, default=None, shell_complete=complete_managed_files)
+@click.argument("file", type=click.Path(path_type=pathlib.Path), required=False, default=None,
+                shell_complete=lambda ctx, param, incomp: complete_managed_files(ctx, param, incomp, True)
+)
 @click.pass_context
 def diff(ctx, file):
     """Show the git diff of managed dotfiles. If FILE is given, show only that file."""
@@ -554,7 +571,9 @@ def diff(ctx, file):
 
 
 @main.command()
-@click.argument("files", type=click.Path(path_type=pathlib.Path), nargs=-1, required=True, shell_complete=complete_managed_files)
+@click.argument("files", type=click.Path(path_type=pathlib.Path), nargs=-1, required=True,
+                shell_complete=lambda ctx, param, incomp: complete_managed_files(ctx, param, incomp, True)
+)
 @click.option("-m", "--message", default=None, help="Commit message. Default: auto-generated.")
 @click.pass_context
 def commit(ctx, files, message):
@@ -585,7 +604,9 @@ def commit(ctx, files, message):
 
 
 @main.command()
-@click.argument("files", type=click.Path(path_type=pathlib.Path), nargs=-1, shell_complete=complete_managed_files)
+@click.argument("files", type=click.Path(path_type=pathlib.Path), nargs=-1,
+                shell_complete=lambda ctx, param, incomp: complete_managed_files(ctx, param, incomp, True)
+)
 @click.option("-y", "--yes", is_flag=True, help="Skip confirmation prompt")
 @click.pass_context
 def reset(ctx, files, yes):
